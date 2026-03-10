@@ -54,7 +54,10 @@ for plist in "$LAUNCHD_DIR"/com.claudeclaw.*.plist; do
   fi
 
   echo "Installing $label..."
-  cp "$plist" "$dest"
+  # Copy template and substitute placeholders with actual paths
+  sed -e "s|__PROJECT_DIR__|$PROJECT_DIR|g" \
+      -e "s|__HOME__|$HOME|g" \
+      "$plist" > "$dest"
   launchctl load "$dest"
 done
 

@@ -26,3 +26,6 @@ migrations/.applied.json
 .idea/
 *.swp
 .wwebjs_cache/
+
+# Personal scripts — not for sharing
+scripts/waste-reminder.sh

@@ -67,9 +67,6 @@ export function loadAgentConfig(agentId: string): AgentConfig {
 
   const env = readEnvFile([botTokenEnv]);
   const botToken = process.env[botTokenEnv] || env[botTokenEnv] || '';
-  if (!botToken) {
-    throw new Error(`Bot token not found: set ${botTokenEnv} in .env`);
-  }
 
   let obsidian: AgentConfig['obsidian'];
   const obsRaw = raw['obsidian'] as Record<string, unknown> | undefined;

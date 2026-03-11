@@ -43,13 +43,18 @@ export function initOrchestrator(): void {
   for (const id of ids) {
     try {
       const config = loadAgentConfig(id);
+      if (!config.botToken) {
+        // Agent exists but has no bot token set — silently skip (deferred agent)
+        logger.debug({ agentId: id }, 'Skipping agent — no bot token configured');
+        continue;
+      }
       agentRegistry.push({
         id,
         name: config.name,
         description: config.description,
       });
     } catch (err) {
-      // Agent config is broken (e.g. missing token) — skip it but warn
+      // Agent config is broken (e.g. bad YAML) — warn
       logger.warn({ agentId: id, err }, 'Skipping agent — config load failed');
     }
   }

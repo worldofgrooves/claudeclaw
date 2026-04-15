@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { execSync } from 'child_process';
 import { Api, Bot, Context, InputFile, RawApi } from 'grammy';
 
 import { runAgent, UsageInfo, AgentProgressEvent } from './agent.js';
@@ -27,6 +28,7 @@ import { buildMemoryContext, evaluateMemoryRelevance, saveConversationTurn } fro
 import { setHighImportanceCallback } from './memory-ingest.js';
 import { messageQueue } from './message-queue.js';
 import { parseDelegation, delegateToAgent, getAvailableAgents } from './orchestrator.js';
+import { listAgentIds } from './agent-config.js';
 import { emitChatEvent, setProcessing, setActiveAbort, abortActiveQuery } from './state.js';
 import {
   isLocked,
@@ -775,6 +777,7 @@ export function createBot(): Bot {
     { command: 'slack', description: 'Recent Slack messages' },
     { command: 'dashboard', description: 'Open web dashboard' },
     { command: 'stop', description: 'Stop current processing' },
+    { command: 'restart', description: 'Restart an agent (or self)' },
     { command: 'agents', description: 'List available agents' },
     { command: 'delegate', description: 'Delegate task to agent' },
     { command: 'lock', description: 'Lock session (requires PIN to unlock)' },
@@ -1103,6 +1106,97 @@ export function createBot(): Bot {
     }
   });
 
+  // /restart [agent-id|all] — restart an agent process via launchd
+  bot.command('restart', async (ctx) => {
+    if (!isAuthorised(ctx.chat!.id)) return;
+    const arg = (ctx.match as string || '').trim().toLowerCase();
+    const uid = process.getuid?.() ?? 501;
+
+    // Map agent IDs to launchd service labels.
+    // These labels come from the .plist filenames in ~/Library/LaunchAgents/
+    // and do NOT follow a simple com.claudeclaw.<agentId> pattern.
+    const AGENT_SERVICE_LABELS: Record<string, string> = {
+      main: 'com.claudeclaw.app',
+      janet: 'com.claudeclaw.app',
+      app: 'com.claudeclaw.app',
+      pepper: 'com.claudeclaw.agent-pepper',
+      'tony-stark': 'com.claudeclaw.tony-stark',
+      jarvis: 'com.claudeclaw.jarvis',
+      vision: 'com.claudeclaw.build',
+      'black-widow': 'com.claudeclaw.ops',
+      'jean-grey': 'com.claudeclaw.content',
+      'nick-fury': 'com.claudeclaw.research',
+      loki: 'com.claudeclaw.marketing',
+      'peter-parker': 'com.claudeclaw.creative',
+      wanda: 'com.claudeclaw.automation',
+    };
+    const resolveServiceLabel = (id: string): string => {
+      return AGENT_SERVICE_LABELS[id] ?? `com.claudeclaw.${id}`;
+    };
+
+    if (!arg) {
+      // No argument -- show usage
+      const agents = listAgentIds();
+      await ctx.reply(
+        '<b>/restart</b> — Restart agent processes\n\n' +
+        '<b>Usage:</b>\n' +
+        '<code>/restart tony-stark</code> — restart a specific agent\n' +
+        '<code>/restart all</code> — restart all agents (not Janet)\n' +
+        '<code>/restart self</code> — restart this bot\'s process\n\n' +
+        '<b>Available agents:</b>\n' + agents.join(', '),
+        { parse_mode: 'HTML' },
+      );
+      return;
+    }
+
+    if (arg === 'all') {
+      // Restart all agents except the current process
+      const agents = listAgentIds();
+      const selfId = AGENT_ID || 'main';
+      const results: string[] = [];
+      for (const id of agents) {
+        if (id === selfId) continue; // don't restart self in "all" mode
+        const label = resolveServiceLabel(id);
+        try {
+          execSync(`launchctl kickstart -k gui/${uid}/${label}`, { timeout: 10000 });
+          results.push(`${id}: restarted`);
+        } catch {
+          results.push(`${id}: FAILED`);
+        }
+      }
+      await ctx.reply(`Restarted ${results.filter(r => r.includes('restarted')).length}/${results.length} agents:\n\n${results.join('\n')}`);
+      return;
+    }
+
+    if (arg === 'self' || arg === 'me') {
+      // Restart this process
+      const label = resolveServiceLabel(AGENT_ID || 'main');
+      await ctx.reply(`Restarting ${AGENT_ID || 'main'} (${label})... I'll be back in a few seconds.`);
+      // Small delay so the reply sends before we die
+      setTimeout(() => {
+        try { execSync(`launchctl kickstart -k gui/${uid}/${label}`, { timeout: 10000 }); } catch { /* we'll be dead */ }
+      }, 500);
+      return;
+    }
+
+    // Restart a specific agent
+    const targetId = arg;
+    const allAgents = listAgentIds();
+    if (!allAgents.includes(targetId) && targetId !== 'main' && targetId !== 'janet' && targetId !== 'app') {
+      await ctx.reply(`Unknown agent: ${targetId}\n\nAvailable: ${allAgents.join(', ')}, main`);
+      return;
+    }
+
+    const label = resolveServiceLabel(targetId);
+    try {
+      execSync(`launchctl kickstart -k gui/${uid}/${label}`, { timeout: 10000 });
+      await ctx.reply(`Restarted ${targetId} (${label}).`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await ctx.reply(`Failed to restart ${targetId}: ${msg}`);
+    }
+  });
+
   // /agents — list available agents for delegation
   bot.command('agents', async (ctx) => {
     if (!isAuthorised(ctx.chat!.id)) return;
@@ -1167,7 +1261,7 @@ export function createBot(): Bot {
   });
 
   // Text messages — and any slash commands not owned by this bot (skills, e.g. /todo /gmail)
-  const OWN_COMMANDS = new Set(['/start', '/help', '/newchat', '/respin', '/voice', '/model', '/memory', '/forget', '/pin', '/unpin', '/chatid', '/wa', '/slack', '/dashboard', '/stop', '/agents', '/delegate', '/lock', '/status']);
+  const OWN_COMMANDS = new Set(['/start', '/help', '/newchat', '/respin', '/voice', '/model', '/memory', '/forget', '/pin', '/unpin', '/chatid', '/wa', '/slack', '/dashboard', '/stop', '/restart', '/agents', '/delegate', '/lock', '/status']);
   bot.on('message:text', async (ctx) => {
     const text = ctx.message.text;
     const chatIdStr = ctx.chat!.id.toString();

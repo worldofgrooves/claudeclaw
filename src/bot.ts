@@ -26,6 +26,7 @@ import { logger } from './logger.js';
 import { downloadMedia, buildPhotoMessage, buildDocumentMessage, buildVideoMessage } from './media.js';
 import { buildMemoryContext, evaluateMemoryRelevance, saveConversationTurn } from './memory.js';
 import { setHighImportanceCallback } from './memory-ingest.js';
+import { addToMediaGroup, buildBatchMessage, BufferedMedia } from './media-group.js';
 import { messageQueue } from './message-queue.js';
 import { parseDelegation, delegateToAgent, getAvailableAgents } from './orchestrator.js';
 import { listAgentIds } from './agent-config.js';
@@ -49,7 +50,7 @@ const GLOBAL_STREAM_INTERVAL_MS = 2500;
 // ── Context window tracking ──────────────────────────────────────────
 // Uses input_tokens from the last API call (= actual context window size:
 // system prompt + conversation history + tool results for that call).
-// Compares against CONTEXT_LIMIT (default 1M for Opus 4.6 1M, configurable).
+// Compares against CONTEXT_LIMIT (default 1M for Opus 4.7 1M, configurable).
 //
 // On a fresh session the base overhead (system prompt, skills, CLAUDE.md,
 // MCP tools) can be 200-400k+ tokens. We track that baseline per session
@@ -111,7 +112,7 @@ const voiceEnabledChats = new Set<string>();
 const chatModelOverride = new Map<string, string>();
 
 const AVAILABLE_MODELS: Record<string, string> = {
-  opus: 'claude-opus-4-6',
+  opus: 'claude-opus-4-7',
   sonnet: 'claude-sonnet-4-5',
   haiku: 'claude-haiku-4-5',
 };
@@ -1474,7 +1475,7 @@ export function createBot(): Bot {
     }
   });
 
-  // Photos — download and pass to Claude
+  // Photos — download and batch media groups before passing to Claude
   bot.on('message:photo', async (ctx) => {
     const chatId = ctx.chat!.id;
     if (!isAuthorised(chatId)) return;
@@ -1488,16 +1489,29 @@ export function createBot(): Bot {
     try {
       const photo = ctx.message.photo[ctx.message.photo.length - 1];
       const localPath = await downloadMedia(activeBotToken, photo.file_id, 'photo.jpg');
-      const msg = buildPhotoMessage(localPath, ctx.message.caption ?? undefined);
       const chatIdStr = chatId.toString();
-      messageQueue.enqueue(chatIdStr, () => handleMessage(ctx, msg));
+      const entry: BufferedMedia = {
+        localPath,
+        caption: ctx.message.caption ?? undefined,
+        type: 'photo',
+      };
+
+      addToMediaGroup(
+        ctx.message.media_group_id,
+        chatIdStr,
+        entry,
+        (entries) => {
+          const msg = buildBatchMessage(entries);
+          messageQueue.enqueue(chatIdStr, () => handleMessage(ctx, msg));
+        },
+      );
     } catch (err) {
       logger.error({ err }, 'Photo download failed');
       await ctx.reply('Could not download photo. Try again.');
     }
   });
 
-  // Documents — download and pass to Claude
+  // Documents — download and batch media groups before passing to Claude
   bot.on('message:document', async (ctx) => {
     const chatId = ctx.chat!.id;
     if (!isAuthorised(chatId)) return;
@@ -1512,16 +1526,30 @@ export function createBot(): Bot {
       const doc = ctx.message.document;
       const filename = doc.file_name ?? 'file';
       const localPath = await downloadMedia(activeBotToken, doc.file_id, filename);
-      const msg = buildDocumentMessage(localPath, filename, ctx.message.caption ?? undefined);
       const chatIdStr = chatId.toString();
-      messageQueue.enqueue(chatIdStr, () => handleMessage(ctx, msg));
+      const entry: BufferedMedia = {
+        localPath,
+        caption: ctx.message.caption ?? undefined,
+        type: 'document',
+        filename,
+      };
+
+      addToMediaGroup(
+        ctx.message.media_group_id,
+        chatIdStr,
+        entry,
+        (entries) => {
+          const msg = buildBatchMessage(entries);
+          messageQueue.enqueue(chatIdStr, () => handleMessage(ctx, msg));
+        },
+      );
     } catch (err) {
       logger.error({ err }, 'Document download failed');
       await ctx.reply('Could not download document. Try again.');
     }
   });
 
-  // Videos — download and pass to Claude for Gemini analysis
+  // Videos — download and batch media groups before passing to Claude
   bot.on('message:video', async (ctx) => {
     const chatId = ctx.chat!.id;
     if (!isAuthorised(chatId)) return;
@@ -1534,16 +1562,30 @@ export function createBot(): Bot {
       const video = ctx.message.video;
       const filename = video.file_name ?? `video_${Date.now()}.mp4`;
       const localPath = await downloadMedia(activeBotToken, video.file_id, filename);
-      const msg = buildVideoMessage(localPath, ctx.message.caption ?? undefined);
       const chatIdStr = chatId.toString();
-      messageQueue.enqueue(chatIdStr, () => handleMessage(ctx, msg));
+      const entry: BufferedMedia = {
+        localPath,
+        caption: ctx.message.caption ?? undefined,
+        type: 'video',
+        filename,
+      };
+
+      addToMediaGroup(
+        ctx.message.media_group_id,
+        chatIdStr,
+        entry,
+        (entries) => {
+          const msg = buildBatchMessage(entries);
+          messageQueue.enqueue(chatIdStr, () => handleMessage(ctx, msg));
+        },
+      );
     } catch (err) {
       logger.error({ err }, 'Video download failed');
       await ctx.reply('Could not download video. Note: Telegram bots are limited to 20MB downloads.');
     }
   });
 
-  // Video notes (circular format) — download and pass to Claude for Gemini analysis
+  // Video notes (circular format) — download and batch before passing to Claude
   bot.on('message:video_note', async (ctx) => {
     const chatId = ctx.chat!.id;
     if (!isAuthorised(chatId)) return;
@@ -1556,9 +1598,22 @@ export function createBot(): Bot {
       const videoNote = ctx.message.video_note;
       const filename = `video_note_${Date.now()}.mp4`;
       const localPath = await downloadMedia(activeBotToken, videoNote.file_id, filename);
-      const msg = buildVideoMessage(localPath, undefined);
       const chatIdStr = chatId.toString();
-      messageQueue.enqueue(chatIdStr, () => handleMessage(ctx, msg));
+      const entry: BufferedMedia = {
+        localPath,
+        type: 'video_note',
+        filename,
+      };
+
+      addToMediaGroup(
+        ctx.message.media_group_id,
+        chatIdStr,
+        entry,
+        (entries) => {
+          const msg = buildBatchMessage(entries);
+          messageQueue.enqueue(chatIdStr, () => handleMessage(ctx, msg));
+        },
+      );
     } catch (err) {
       logger.error({ err }, 'Video note download failed');
       await ctx.reply('Could not download video note. Note: Telegram bots are limited to 20MB downloads.');

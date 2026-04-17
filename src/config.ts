@@ -130,7 +130,7 @@ export const AGENT_MAX_TURNS = parseInt(
   10,
 );
 
-// Context window limit for the model. Opus 4.6 (1M context) = 1,000,000.
+// Context window limit for the model. Opus 4.7 (1M context) = 1,000,000.
 // Override via CONTEXT_LIMIT in .env if using a different model variant.
 export const CONTEXT_LIMIT = parseInt(
   process.env.CONTEXT_LIMIT || envConfig.CONTEXT_LIMIT || '1000000',

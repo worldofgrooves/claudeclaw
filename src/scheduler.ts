@@ -15,6 +15,7 @@ import {
   markInterAgentTaskInProgress,
   resetStuckInterAgentTasks,
   completeInterAgentTask,
+  saveTaskResumeSession,
 } from './db.js';
 import { logger } from './logger.js';
 import { messageQueue } from './message-queue.js';
@@ -26,12 +27,12 @@ import { loadAgentConfig } from './agent-config.js';
 type Sender = (text: string) => Promise<void>;
 
 /** Default timeout (ms) for tasks when no agent-specific override exists. */
-const DEFAULT_TASK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+const DEFAULT_TASK_TIMEOUT_MS = 120 * 60 * 1000; // 120 minutes
 
 /**
  * Resolve the timeout for a scheduled task based on the agent's config.
  * Uses task_timeout_minutes from agent.yaml if available, otherwise falls back
- * to DEFAULT_TASK_TIMEOUT_MS (10 minutes).
+ * to DEFAULT_TASK_TIMEOUT_MS (120 minutes).
  */
 function resolveTaskTimeoutMs(agentId: string): number {
   try {
@@ -73,19 +74,22 @@ export function initScheduler(send: Sender, agentId = 'main'): void {
   sender = send;
   schedulerAgentId = agentId;
 
-  // Recover tasks stuck in 'running' from a previous crash
-  const recovered = resetStuckTasks(agentId);
-  if (recovered > 0) {
-    logger.warn({ recovered, agentId }, 'Reset stuck tasks from previous crash');
-  }
-  const recoveredMission = resetStuckMissionTasks(agentId);
-  if (recoveredMission > 0) {
-    logger.warn({ recovered: recoveredMission, agentId }, 'Reset stuck mission tasks from previous crash');
-  }
+  // Recover tasks stuck in 'running' from a previous crash.
+  // Only reset tasks older than the agent's configured timeout.
+  const timeoutMs = resolveTaskTimeoutMs(agentId);
+  const maxAgeSeconds = Math.floor(timeoutMs / 1000);
 
-  const recoveredInterAgent = resetStuckInterAgentTasks(agentId);
+  const recovered = resetStuckTasks(agentId, maxAgeSeconds);
+  if (recovered > 0) {
+    logger.warn({ recovered, agentId, maxAgeSeconds }, 'Reset stuck scheduled tasks older than timeout');
+  }
+  const recoveredMission = resetStuckMissionTasks(agentId, maxAgeSeconds);
+  if (recoveredMission > 0) {
+    logger.warn({ recovered: recoveredMission, agentId, maxAgeSeconds }, 'Reset stuck mission tasks older than timeout');
+  }
+  const recoveredInterAgent = resetStuckInterAgentTasks(agentId, maxAgeSeconds);
   if (recoveredInterAgent > 0) {
-    logger.warn({ recovered: recoveredInterAgent, agentId }, 'Reset stuck inter-agent tasks from previous crash');
+    logger.warn({ recovered: recoveredInterAgent, agentId, maxAgeSeconds }, 'Reset stuck inter-agent tasks older than timeout');
   }
 
   setInterval(() => void runDueTasks(), 60_000);
@@ -210,9 +214,17 @@ async function runDueTasks(): Promise<void> {
       try {
         await sender(`Scheduled task running: "${task.prompt.slice(0, 80)}${task.prompt.length > 80 ? '...' : ''}"`);
 
-        // Run as a fresh agent call (no session — scheduled tasks are autonomous)
-        const result = await runAgent(task.prompt, undefined, () => {}, undefined, undefined, abortController, undefined, agentMcpAllowlist);
+        // Resume previous session if available (enables context continuity across
+        // MC verification cycles -- agent retains memory of previous attempt).
+        const resumeSessionId = task.resume_session_id || undefined;
+        const result = await runAgent(task.prompt, resumeSessionId, () => {}, undefined, undefined, abortController, undefined, agentMcpAllowlist);
         clearTimeout(timeout);
+
+        // Persist session ID for potential re-dispatch (verification failure cycle).
+        // Even on timeout/abort, save the session so the next attempt can resume.
+        if (result.newSessionId) {
+          saveTaskResumeSession(task.id, result.newSessionId);
+        }
 
         if (result.aborted) {
           updateTaskAfterRun(task.id, nextRun, `Timed out after ${taskTimeoutLabel}`, 'timeout');
@@ -235,7 +247,7 @@ async function runDueTasks(): Promise<void> {
 
         updateTaskAfterRun(task.id, nextRun, text, 'success');
 
-        logger.info({ taskId: task.id, nextRun }, 'Task complete, next run scheduled');
+        logger.info({ taskId: task.id, nextRun, hasResumedSession: !!resumeSessionId }, 'Task complete, next run scheduled');
       } catch (err) {
         clearTimeout(timeout);
         const errMsg = err instanceof Error ? err.message : String(err);

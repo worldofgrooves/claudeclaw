@@ -349,6 +349,12 @@ function runMigrations(database: Database.Database): void {
   if (!taskColNames.includes('last_status')) {
     database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN last_status TEXT`);
   }
+  // Session persistence: store resume session ID for MC task re-dispatch.
+  // When an agent finishes a task and it fails verification, the next dispatch
+  // can resume the same Claude Code session for full context continuity.
+  if (!taskColNames.includes('resume_session_id')) {
+    database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN resume_session_id TEXT`);
+  }
 
   // ── Memory V2 migration ──────────────────────────────────────────────
   // Detect old schema (has 'sector' column but no 'importance') and migrate.
@@ -533,6 +539,11 @@ function runMigrations(database: Database.Database): void {
   if (!interAgentCols.some((c) => c.name === 'acknowledged')) {
     database.exec(`ALTER TABLE inter_agent_tasks ADD COLUMN acknowledged INTEGER NOT NULL DEFAULT 0`);
     logger.info('Migration: added acknowledged column to inter_agent_tasks');
+  }
+
+  if (!interAgentCols.some((c) => c.name === 'started_at')) {
+    database.exec(`ALTER TABLE inter_agent_tasks ADD COLUMN started_at INTEGER`);
+    logger.info('Migration: added started_at column to inter_agent_tasks');
   }
 }
 
@@ -924,6 +935,8 @@ export interface ScheduledTask {
   agent_id: string;
   started_at: number | null;
   last_status: 'success' | 'failed' | 'timeout' | null;
+  /** Claude Code session ID from the previous run, for resumption on re-dispatch. */
+  resume_session_id: string | null;
 }
 
 export function createScheduledTask(
@@ -932,12 +945,22 @@ export function createScheduledTask(
   schedule: string,
   nextRun: number,
   agentId = 'main',
+  resumeSessionId?: string,
 ): void {
   const now = Math.floor(Date.now() / 1000);
   db.prepare(
-    `INSERT INTO scheduled_tasks (id, prompt, schedule, next_run, status, created_at, agent_id)
-     VALUES (?, ?, ?, ?, 'active', ?, ?)`,
-  ).run(id, prompt, schedule, nextRun, now, agentId);
+    `INSERT INTO scheduled_tasks (id, prompt, schedule, next_run, status, created_at, agent_id, resume_session_id)
+     VALUES (?, ?, ?, ?, 'active', ?, ?, ?)`,
+  ).run(id, prompt, schedule, nextRun, now, agentId, resumeSessionId ?? null);
+}
+
+/**
+ * Save a Claude Code session ID to a scheduled task for future resumption.
+ * Called after runAgent() completes so that if the same MC task is re-dispatched
+ * (e.g., after verification failure), the agent can resume with full context.
+ */
+export function saveTaskResumeSession(id: string, sessionId: string): void {
+  db.prepare('UPDATE scheduled_tasks SET resume_session_id = ? WHERE id = ?').run(sessionId, id);
 }
 
 export function getDueTasks(agentId = 'main'): ScheduledTask[] {
@@ -991,10 +1014,13 @@ export function updateTaskAfterRun(
   ).run(now, nextRun, result.slice(0, 4000), lastStatus, id);
 }
 
-export function resetStuckTasks(agentId: string): number {
+export function resetStuckTasks(agentId: string, maxAgeSeconds: number): number {
+  const cutoff = Math.floor(Date.now() / 1000) - maxAgeSeconds;
   const result = db.prepare(
-    `UPDATE scheduled_tasks SET status = 'active', started_at = NULL WHERE status = 'running' AND agent_id = ?`,
-  ).run(agentId);
+    `UPDATE scheduled_tasks SET status = 'active', started_at = NULL
+     WHERE status = 'running' AND agent_id = ?
+     AND COALESCE(started_at, created_at) < ?`,
+  ).run(agentId, cutoff);
   return result.changes;
 }
 
@@ -1714,6 +1740,7 @@ export interface InterAgentTask {
   created_at: string;
   completed_at: string | null;
   acknowledged: number;
+  started_at: number | null;
 }
 
 export function createInterAgentTask(
@@ -1768,22 +1795,27 @@ export function getNextPendingMessage(toAgent: string): InterAgentTask | null {
 
 /** Mark a pending message as in_progress to prevent double-processing. */
 export function markInterAgentTaskInProgress(id: string): void {
+  const now = Math.floor(Date.now() / 1000);
   db.prepare(
-    `UPDATE inter_agent_tasks SET status = 'in_progress' WHERE id = ? AND status = 'pending'`,
-  ).run(id);
+    `UPDATE inter_agent_tasks SET status = 'in_progress', started_at = ? WHERE id = ? AND status = 'pending'`,
+  ).run(now, id);
 }
 
 /**
  * Crash recovery: reset any in_progress inter-agent tasks back to pending for this agent.
  * Called at scheduler startup to recover from mid-execution crashes.
+ * Only resets tasks older than maxAgeSeconds (falls back to created_at when started_at is NULL).
  * Returns the number of tasks reset.
  */
-export function resetStuckInterAgentTasks(toAgent: string): number {
+export function resetStuckInterAgentTasks(toAgent: string, maxAgeSeconds: number): number {
+  const cutoff = Math.floor(Date.now() / 1000) - maxAgeSeconds;
   const info = db
     .prepare(
-      `UPDATE inter_agent_tasks SET status = 'pending' WHERE to_agent = ? AND status = 'in_progress'`,
+      `UPDATE inter_agent_tasks SET status = 'pending', started_at = NULL
+       WHERE to_agent = ? AND status = 'in_progress'
+       AND COALESCE(started_at, CAST(strftime('%s', created_at) AS INTEGER)) < ?`,
     )
-    .run(toAgent);
+    .run(toAgent, cutoff);
   return info.changes;
 }
 
@@ -1959,10 +1991,13 @@ export function getMissionTaskHistory(limit = 30, offset = 0): { tasks: MissionT
   return { tasks, total };
 }
 
-export function resetStuckMissionTasks(agentId: string): number {
+export function resetStuckMissionTasks(agentId: string, maxAgeSeconds: number): number {
+  const cutoff = Math.floor(Date.now() / 1000) - maxAgeSeconds;
   const result = db.prepare(
-    `UPDATE mission_tasks SET status = 'queued', started_at = NULL WHERE status = 'running' AND assigned_agent = ?`,
-  ).run(agentId);
+    `UPDATE mission_tasks SET status = 'queued', started_at = NULL
+     WHERE status = 'running' AND assigned_agent = ?
+     AND COALESCE(started_at, created_at) < ?`,
+  ).run(agentId, cutoff);
   return result.changes;
 }
 

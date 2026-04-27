@@ -213,9 +213,13 @@ describe('task state machine', () => {
     it('resets running tasks back to active for the given agent', () => {
       const past = Math.floor(Date.now() / 1000) - 60;
       createScheduledTask('t1', 'stuck task', '0 9 * * *', past, 'main');
+      // Mark running with an old started_at to simulate a stuck task
+      const oldTime = Date.now() - 7200_000; // 2 hours ago
+      vi.spyOn(Date, 'now').mockReturnValue(oldTime);
       markTaskRunning('t1');
+      vi.restoreAllMocks();
 
-      const count = resetStuckTasks('main');
+      const count = resetStuckTasks('main', 3600); // 1-hour threshold
       expect(count).toBe(1);
 
       const tasks = getAllScheduledTasks('main');
@@ -227,11 +231,15 @@ describe('task state machine', () => {
       const past = Math.floor(Date.now() / 1000) - 60;
       createScheduledTask('t1', 'main stuck', '0 9 * * *', past, 'main');
       createScheduledTask('t2', 'comms stuck', '0 9 * * *', past, 'comms');
+      // Mark both running with old started_at
+      const oldTime = Date.now() - 7200_000; // 2 hours ago
+      vi.spyOn(Date, 'now').mockReturnValue(oldTime);
       markTaskRunning('t1');
       markTaskRunning('t2');
+      vi.restoreAllMocks();
 
       // Reset only main
-      const count = resetStuckTasks('main');
+      const count = resetStuckTasks('main', 3600); // 1-hour threshold
       expect(count).toBe(1);
 
       // main should be active
@@ -247,7 +255,7 @@ describe('task state machine', () => {
       const future = Math.floor(Date.now() / 1000) + 3600;
       createScheduledTask('t1', 'normal task', '0 9 * * *', future, 'main');
 
-      const count = resetStuckTasks('main');
+      const count = resetStuckTasks('main', 7200);
       expect(count).toBe(0);
     });
 
@@ -256,7 +264,7 @@ describe('task state machine', () => {
       createScheduledTask('t1', 'paused task', '0 9 * * *', past, 'main');
       pauseScheduledTask('t1');
 
-      resetStuckTasks('main');
+      resetStuckTasks('main', 7200);
 
       const tasks = getAllScheduledTasks('main');
       expect(tasks[0].status).toBe('paused');

@@ -39,7 +39,7 @@ const SILENT_TASK_PREFIXES = ['mc-wake-'];
  * causes infinite retry loops because the poller treats 'failed' as retriable.
  * Empty output on non-silent poller tasks uses 'completed_empty' instead.
  */
-const POLLER_MANAGED_PREFIXES = ['mc-wake-', 'verify-'];
+const POLLER_MANAGED_PREFIXES = ['mc-wake-', 'verify-', 'content-review-'];
 
 /** Task where empty output is expected behavior (agent had nothing to do). */
 function isExpectedSilent(taskId: string): boolean {

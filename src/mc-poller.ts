@@ -360,6 +360,136 @@ async function pollReviewTasks(): Promise<void> {
 }
 
 /**
+ * Poll for non-build tasks in 'review' status.
+ * Routes to Janet (main process) for quality review instead of Jarvis.
+ * Build tasks continue to route through pollReviewTasks() -> Jarvis.
+ */
+async function pollContentReviewTasks(): Promise<void> {
+  try {
+    const params = new URLSearchParams({
+      select: 'id,task_number,title,description,updated_at,assignee_agent_id,department,status',
+      status: 'eq.review',
+      department: 'neq.build',
+    });
+
+    const url = `${SUPABASE_URL}/rest/v1/mc_tasks?${params}`;
+    const res = await fetch(url, {
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      },
+    });
+
+    if (!res.ok) {
+      logger.error({ status: res.status }, 'Failed to poll non-build review tasks');
+      return;
+    }
+
+    const tasks = (await res.json()) as Array<{
+      id: string;
+      task_number: number;
+      title: string;
+      description: string | null;
+      updated_at: string;
+      assignee_agent_id: string;
+      department: string;
+    }>;
+
+    if (tasks.length === 0) return;
+
+    // Fetch agent map once outside the loop (not per-task)
+    const agentMap = await fetchAgentMap();
+
+    for (const task of tasks) {
+      const taskId = `content-review-${task.id.slice(0, 8)}`;
+      const now = Math.floor(Date.now() / 1000);
+
+      // Dedup: mirrors pollReviewTasks() branch order.
+      // updateTaskAfterRun() always resets status to 'active' -- outcome lives in last_status.
+      // Checking status alone would silently skip all completed reviews forever.
+      const existing = getScheduledTask(taskId);
+      if (existing) {
+        if (existing.last_status === 'success') {
+          // Janet already reviewed this task. Check freshness:
+          // if MC task was re-submitted (updated_at > last_run), re-dispatch.
+          // Otherwise keep the dedup guard -- the review is done.
+          const lastRun = existing.last_run || 0;
+          const taskUpdatedAt = task.updated_at
+            ? Math.floor(new Date(task.updated_at).getTime() / 1000)
+            : 0;
+          if (taskUpdatedAt <= lastRun) {
+            // Janet already reviewed and task hasn't changed. Keep dedup guard.
+            continue;
+          }
+          deleteScheduledTask(taskId);
+          // Fall through to create new review wake
+        } else if (existing.last_status === 'completed_empty') {
+          // Janet produced no output on review -- same freshness check.
+          const lastRun = existing.last_run || 0;
+          const taskUpdatedAt = task.updated_at
+            ? Math.floor(new Date(task.updated_at).getTime() / 1000)
+            : 0;
+          if (taskUpdatedAt <= lastRun) {
+            logger.warn(
+              { taskId, taskNumber: task.task_number },
+              'MC poller: content review completed with no output -- not retrying (completed_empty)',
+            );
+            continue;
+          }
+          deleteScheduledTask(taskId);
+          // Fall through to create new review wake
+        } else if (existing.last_status === 'timeout' || existing.last_status === 'failed') {
+          // Review failed or timed out -- delete and re-dispatch
+          deleteScheduledTask(taskId);
+          // Fall through to create new review wake
+        } else if (existing.status === 'active' || existing.status === 'running') {
+          // Task is queued or currently executing -- skip
+          continue;
+        }
+      }
+
+      // Per-task error isolation: one failed create should not abort remaining tasks
+      try {
+        const builderName = agentMap.get(task.assignee_agent_id) ?? 'unknown agent';
+
+        const reviewPrompt =
+          `Non-build task #${task.task_number} is ready for quality review.\n\n` +
+          `Title: ${task.title}\n` +
+          `Department: ${task.department}\n` +
+          `Builder: ${builderName}\n` +
+          `Description: ${task.description ?? '(none)'}\n\n` +
+          `Review this deliverable for quality, completeness, and alignment with Denver's standards.\n\n` +
+          `1. Read the task description and any attached deliverables (query mc_task_deliverables for task_number ${task.task_number}).\n` +
+          `2. Read the latest mc_task_comments for context.\n` +
+          `3. If the deliverable meets quality standards:\n` +
+          `   - Add an approval comment to the task\n` +
+          `   - Mark the task done: UPDATE mc_tasks SET status = 'done', completed_at = now(), updated_at = now() WHERE task_number = ${task.task_number};\n` +
+          `   - Notify Denver that the deliverable is approved\n` +
+          `4. If the deliverable needs revision:\n` +
+          `   - Add a detailed comment explaining what needs to change\n` +
+          `   - Set status back to assigned: UPDATE mc_tasks SET status = 'assigned', updated_at = now() WHERE task_number = ${task.task_number};\n` +
+          `   - The original builder will be re-woken with the feedback\n\n` +
+          `Do NOT auto-approve. Read the actual deliverable content before deciding.`;
+
+        // Route to main (Janet) -- NOT jarvis
+        createScheduledTask(taskId, reviewPrompt, '0 0 1 1 *', now, 'main');
+        logger.info(
+          { taskNumber: task.task_number, department: task.department, builder: builderName },
+          'Non-build review task routed to Janet',
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!msg.includes('UNIQUE')) {
+          logger.warn({ err, taskNumber: task.task_number }, 'MC poller: failed to create content review wake');
+        }
+      }
+    }
+  } catch (err) {
+    logger.error({ err }, 'Error polling non-build review tasks');
+  }
+}
+
+/**
  * Recover orphaned in_progress tasks on startup.
  *
  * When an agent crashes or restarts, MC tasks it was working on stay stuck at
@@ -804,6 +934,10 @@ export function initMCPoller(send?: Sender, sendStatus?: Sender): void {
   // Poll for build tasks in 'review' status -- routes to Jarvis for QA verification
   void pollReviewTasks();
   setInterval(() => void pollReviewTasks(), POLL_INTERVAL_MS);
+
+  // Poll for non-build tasks in 'review' status -- routes to Janet for quality review
+  void pollContentReviewTasks();
+  setInterval(() => void pollContentReviewTasks(), POLL_INTERVAL_MS);
 
   // Poll for escalation comments -- nudge agents immediately on scope changes
   setInterval(() => void pollEscalationComments(), POLL_INTERVAL_MS);

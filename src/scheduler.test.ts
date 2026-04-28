@@ -110,8 +110,9 @@ describe('task state machine', () => {
       const past = Math.floor(Date.now() / 1000) - 60;
       createScheduledTask('t1', 'task', '0 9 * * *', past, 'main');
 
-      markTaskRunning('t1');
+      const claimed = markTaskRunning('t1');
 
+      expect(claimed).toBe(true);
       const tasks = getAllScheduledTasks('main');
       expect(tasks[0].status).toBe('running');
       expect(tasks[0].started_at).toBeGreaterThan(0);
@@ -128,6 +129,68 @@ describe('task state machine', () => {
 
       // After marking: task is no longer due
       expect(getDueTasks('main')).toHaveLength(0);
+    });
+  });
+
+  // ── markTaskRunning compare-and-swap ────────────────────────────────
+
+  describe('markTaskRunning compare-and-swap', () => {
+    it('returns true when claiming an active task', () => {
+      const past = Math.floor(Date.now() / 1000) - 60;
+      createScheduledTask('t1', 'task', '0 9 * * *', past, 'main');
+
+      const claimed = markTaskRunning('t1');
+      expect(claimed).toBe(true);
+
+      const tasks = getAllScheduledTasks('main');
+      expect(tasks[0].status).toBe('running');
+    });
+
+    it('returns false when task is already running', () => {
+      const past = Math.floor(Date.now() / 1000) - 60;
+      createScheduledTask('t1', 'task', '0 9 * * *', past, 'main');
+
+      // First claim succeeds
+      expect(markTaskRunning('t1')).toBe(true);
+      // Second claim fails (task is now 'running', not 'active')
+      expect(markTaskRunning('t1')).toBe(false);
+
+      // Status unchanged from first claim
+      const tasks = getAllScheduledTasks('main');
+      expect(tasks[0].status).toBe('running');
+    });
+
+    it('returns false when task is paused', () => {
+      const past = Math.floor(Date.now() / 1000) - 60;
+      createScheduledTask('t1', 'task', '0 9 * * *', past, 'main');
+      pauseScheduledTask('t1');
+
+      const claimed = markTaskRunning('t1');
+      expect(claimed).toBe(false);
+
+      // Status still paused
+      const tasks = getAllScheduledTasks('main');
+      expect(tasks[0].status).toBe('paused');
+    });
+
+    it('updates next_run only on successful claim', () => {
+      const past = Math.floor(Date.now() / 1000) - 60;
+      createScheduledTask('t1', 'active task', '0 9 * * *', past, 'main');
+      createScheduledTask('t2', 'running task', '0 9 * * *', past, 'main');
+
+      // Claim t2 first so it's in 'running' state
+      markTaskRunning('t2');
+      const t2BeforeNextRun = getAllScheduledTasks('main').find(t => t.id === 't2')!.next_run;
+
+      // Successful claim updates next_run
+      const futureRun = Math.floor(Date.now() / 1000) + 86400;
+      expect(markTaskRunning('t1', futureRun)).toBe(true);
+      expect(getAllScheduledTasks('main').find(t => t.id === 't1')!.next_run).toBe(futureRun);
+
+      // Failed claim does NOT update next_run
+      const anotherFuture = Math.floor(Date.now() / 1000) + 172800;
+      expect(markTaskRunning('t2', anotherFuture)).toBe(false);
+      expect(getAllScheduledTasks('main').find(t => t.id === 't2')!.next_run).toBe(t2BeforeNextRun);
     });
   });
 

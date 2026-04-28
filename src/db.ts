@@ -1014,18 +1014,24 @@ export function getAllScheduledTasks(agentId?: string): ScheduledTask[] {
  * scheduled occurrence. Advancing next_run immediately prevents the scheduler
  * from re-firing the same task on subsequent ticks while it is still executing
  * (double-fire bug), and survives process restarts since the value is persisted.
+ *
+ * Compare-and-swap: only succeeds if the task is currently 'active'.
+ * Returns true if the claim succeeded, false if the task was already
+ * claimed by another tick or is in a non-active state (running, paused, etc.).
  */
-export function markTaskRunning(id: string, tentativeNextRun?: number): void {
+export function markTaskRunning(id: string, tentativeNextRun?: number): boolean {
   const now = Math.floor(Date.now() / 1000);
+  let result;
   if (tentativeNextRun !== undefined) {
-    db.prepare(
-      `UPDATE scheduled_tasks SET status = 'running', started_at = ?, next_run = ? WHERE id = ?`,
+    result = db.prepare(
+      `UPDATE scheduled_tasks SET status = 'running', started_at = ?, next_run = ? WHERE id = ? AND status = 'active'`,
     ).run(now, tentativeNextRun, id);
   } else {
-    db.prepare(
-      `UPDATE scheduled_tasks SET status = 'running', started_at = ? WHERE id = ?`,
+    result = db.prepare(
+      `UPDATE scheduled_tasks SET status = 'running', started_at = ? WHERE id = ? AND status = 'active'`,
     ).run(now, id);
   }
+  return result.changes === 1;
 }
 
 export function updateTaskAfterRun(

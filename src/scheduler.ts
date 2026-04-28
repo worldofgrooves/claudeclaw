@@ -223,8 +223,12 @@ async function runDueTasks(): Promise<void> {
     // Compute next occurrence BEFORE executing so we can lock the task
     // in the DB immediately, preventing re-fire on subsequent ticks.
     const nextRun = computeNextRun(task.schedule);
+    const claimed = markTaskRunning(task.id, nextRun);
+    if (!claimed) {
+      logger.warn({ taskId: task.id }, 'Task already claimed by another tick, skipping');
+      continue;
+    }
     runningTaskIds.add(task.id);
-    markTaskRunning(task.id, nextRun);
 
     logger.info({ taskId: task.id, prompt: task.prompt.slice(0, 60) }, 'Firing task');
 

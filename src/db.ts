@@ -293,7 +293,9 @@ export function initDatabase(): void {
       if (fs.existsSync(f)) fs.chmodSync(f, 0o600);
     }
     fs.chmodSync(STORE_DIR, 0o700);
-  } catch { /* non-fatal on platforms that don't support chmod */ }
+  } catch (err) {
+    logger.debug({ err, context: 'initDatabase' }, 'chmod failed (non-fatal on platforms that do not support chmod)');
+  }
 }
 
 /** Add columns that may not exist in older databases. */

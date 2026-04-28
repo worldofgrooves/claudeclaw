@@ -37,7 +37,8 @@ function readCredentials(): Credentials | null {
   try {
     const raw = fs.readFileSync(CREDENTIALS_PATH, 'utf-8');
     return JSON.parse(raw) as Credentials;
-  } catch {
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err), context: 'readCredentials' }, 'Failed to read or parse credentials file');
     return null;
   }
 }

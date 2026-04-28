@@ -455,10 +455,15 @@ export function startDashboard(botApi?: Api<RawApi>): void {
 
     const agentIds = listAgentIds();
     const updated: string[] = [];
+    const failed: Array<{ id: string; error: string }> = [];
     for (const id of agentIds) {
-      try { setAgentModel(id, model); updated.push(id); } catch {}
+      try { setAgentModel(id, model); updated.push(id); } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error({ err, agentId: id, context: 'PATCH /api/agents/model' }, 'Failed to set model for agent');
+        failed.push({ id, error: msg });
+      }
     }
-    return c.json({ ok: true, model, updated });
+    return c.json({ ok: true, model, updated, failed });
   });
 
   // ── Agent Creation & Management ──────────────────────────────────────

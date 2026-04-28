@@ -577,9 +577,9 @@ function renderMemoryItem(m) {
   let entities = [];
   let topics = [];
   let connections = [];
-  try { entities = JSON.parse(m.entities); } catch {}
-  try { topics = JSON.parse(m.topics); } catch {}
-  try { connections = JSON.parse(m.connections); } catch {}
+  try { entities = JSON.parse(m.entities); } catch (e) { console.warn('Failed to parse memory entities:', e); }
+  try { topics = JSON.parse(m.topics); } catch (e) { console.warn('Failed to parse memory topics:', e); }
+  try { connections = JSON.parse(m.connections); } catch (e) { console.warn('Failed to parse memory connections:', e); }
   const topicTags = topics.length > 0 ? '<div class="mt-1">' + topics.map(t => '<span style="background:#1e293b;padding:1px 6px;border-radius:4px;margin-right:3px;font-size:11px;color:#94a3b8">' + escapeHtml(t) + '</span>').join('') + '</div>' : '';
   const entityLine = entities.length > 0 ? '<div class="text-xs text-gray-600 mt-1">entities: ' + escapeHtml(entities.join(', ')) + '</div>' : '';
   const connLine = connections.length > 0 ? '<div class="text-xs text-gray-600 mt-1">linked to: ' + connections.map(c => '#' + c.linked_to + ' (' + escapeHtml(c.relationship || '') + ')').join(', ') + '</div>' : '';
@@ -787,7 +787,7 @@ function renderTopics(topicsJson) {
     const topics = JSON.parse(topicsJson);
     if (!topics.length) return '';
     return '<div class="text-xs text-gray-600 mt-0.5">' + topics.map(t => '<span style="background:#1e293b;padding:1px 6px;border-radius:4px;margin-right:3px">' + escapeHtml(t) + '</span>').join('') + '</div>';
-  } catch { return ''; }
+  } catch (e) { console.warn('Failed to parse topics JSON:', e); return ''; }
 }
 
 async function loadMemories() {
@@ -989,7 +989,11 @@ async function loadAgents() {
         (a.running ? '<div class="text-xs text-gray-400 mt-1">' + a.todayTurns + ' turns</div>' : '') +
       '</div>';
     }).join('');
-  } catch {}
+  } catch (e) {
+    console.error('Failed to load agents panel:', e);
+    var container = document.getElementById('agents-container');
+    if (container) container.innerHTML = '<div class="text-xs text-red-400 py-2">Failed to load agents</div>';
+  }
 }
 
 function toggleModelPicker(el) {
@@ -1448,7 +1452,7 @@ function copyToClipboard(text) {
     var orig = el.style.color;
     el.style.color = '#6ee7b7';
     setTimeout(function() { el.style.color = orig; }, 800);
-  }).catch(function() {});
+  }).catch(function(e) { console.warn('Clipboard write failed:', e); });
 }
 
 async function loadHiveMind() {

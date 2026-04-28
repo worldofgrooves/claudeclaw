@@ -4,6 +4,7 @@ import yaml from 'js-yaml';
 
 import { CLAUDECLAW_CONFIG, PROJECT_ROOT } from './config.js';
 import { readEnvFile } from './env.js';
+import { logger } from './logger.js';
 
 export interface AgentConfig {
   name: string;
@@ -11,6 +12,7 @@ export interface AgentConfig {
   botTokenEnv: string;
   botToken: string;
   model?: string;
+  taskTimeoutMinutes?: number;
   mcpServers?: string[];
   obsidian?: {
     vault: string;
@@ -87,7 +89,12 @@ export function loadAgentConfig(agentId: string): AgentConfig {
 
   const mcpServers = raw['mcp_servers'] as string[] | undefined;
 
-  return { name, description, botTokenEnv, botToken, model, mcpServers, obsidian };
+  const taskTimeoutRaw = raw['task_timeout_minutes'] as number | undefined;
+  const taskTimeoutMinutes = typeof taskTimeoutRaw === 'number' && taskTimeoutRaw > 0
+    ? taskTimeoutRaw
+    : undefined;
+
+  return { name, description, botTokenEnv, botToken, model, taskTimeoutMinutes, mcpServers, obsidian };
 }
 
 /** Update the model field in an agent's agent.yaml file. */
@@ -129,7 +136,8 @@ export function getAgentCapabilities(
   try {
     const config = loadAgentConfig(agentId);
     return { name: config.name, description: config.description };
-  } catch {
+  } catch (err) {
+    logger.warn({ err, agentId, context: 'getAgentCapabilities' }, 'Failed to load agent config');
     return null;
   }
 }
@@ -162,8 +170,8 @@ export function listAllAgents(): Array<{
         description: config.description,
         model: config.model,
       });
-    } catch {
-      // Skip agents with broken config
+    } catch (err) {
+      logger.warn({ err, agentId: id, context: 'listAllAgents' }, 'Skipping agent with broken config');
     }
   }
 

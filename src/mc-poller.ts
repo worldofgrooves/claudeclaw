@@ -14,7 +14,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { createScheduledTask, deleteScheduledTask, getAllScheduledTasks, type ScheduledTask } from './db.js';
+import { createScheduledTask, deleteScheduledTask, getAllScheduledTasks, updateTaskAfterRun, type ScheduledTask } from './db.js';
 import { readEnvFile } from './env.js';
 
 const envConfig = readEnvFile(['SUPABASE_URL', 'SUPABASE_ANON_KEY']);
@@ -287,7 +287,40 @@ export async function handleBuildReviewTasks(tasks: MCTask[], agentMap: Map<stri
         // Task was re-submitted after Codex passed -- legitimate re-review
         deleteScheduledTask(taskId);
         // Fall through to create new wake
-      } else if (existing.last_status === 'timeout' || existing.last_status === 'failed') {
+      } else if (existing.last_status === 'timeout') {
+        // Timeout = infrastructure/time issue. Safe to redispatch unconditionally.
+        deleteScheduledTask(taskId);
+        // Fall through to create new wake
+      } else if (existing.last_status === 'failed') {
+        // Verification failure. Check if the MC task has been updated since the failure.
+        // If not, the builder hasn't acted yet -- notify Denver once and hold (no retry loop).
+        const lastRun = existing.last_run || 0;
+        const taskUpdatedAt = task.updated_at
+          ? Math.floor(new Date(task.updated_at).getTime() / 1000)
+          : 0;
+
+        if (taskUpdatedAt <= lastRun) {
+          // Task hasn't been updated since last failure. Builder hasn't acted.
+          if (existing.last_result?.includes('[stale: already-escalated]')) {
+            // Already notified Denver this cycle. Suppress repeat -- keep scheduled task as dedup guard.
+            continue;
+          }
+          // First detection of this stale failure. Notify Denver once and mark escalated.
+          logger.warn(
+            { taskId, taskNumber: task.task_number },
+            'MC poller: verify task stale after failure -- escalating to Denver (one-time)',
+          );
+          updateTaskAfterRun(taskId, existing.next_run, '[stale: already-escalated]', 'failed');
+          const escalationSender = notifySender || statusSender;
+          if (escalationSender) {
+            void escalationSender(
+              `⚠️ Verify task #${task.task_number} stalled: builder hasn't resubmitted after failure. Manual review needed. (${task.title || 'Untitled'})`,
+            ).catch(() => {});
+          }
+          continue;
+        }
+
+        // Task was updated after failure -- legitimate re-review.
         deleteScheduledTask(taskId);
         // Fall through to create new wake
       } else if (existing.last_status === 'completed_empty') {

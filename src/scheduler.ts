@@ -286,8 +286,19 @@ async function runDueTasks(): Promise<void> {
           // Mark success so poller treats it as a normal completed cycle.
           updateTaskAfterRun(task.id, nextRun, '[no-op: agent had no assigned tasks]', 'success');
           logger.info({ taskId: task.id }, 'Wake prompt completed with no output (expected)');
+        } else if (!rawText && task.id.startsWith('verify-')) {
+          // verify- task with no output = verification failure (Codex agent crashed or returned nothing).
+          // Distinct from infrastructure failures (outer catch marks 'failed' with the error message).
+          // Mark 'failed' so the mc-poller staleness guard detects it and avoids a retry loop.
+          updateTaskAfterRun(task.id, nextRun, '[verification failed: agent produced no output]', 'failed');
+          logger.warn({ taskId: task.id }, 'Verify task produced no output -- marked failed (poller staleness guard will handle)');
+          try {
+            await sender(`❌ Verification task produced no output: "${task.prompt.slice(0, 80)}..." -- Codex agent may have crashed. Builder should resubmit after confirming the issue.`);
+          } catch (sendErr) {
+            logger.warn({ sendErr, taskId: task.id }, 'Failed to send verify empty-output notification');
+          }
         } else if (!rawText && isPollerManaged(task.id)) {
-          // Poller-managed task (e.g., verify-*) with no output = unexpected.
+          // Other poller-managed tasks (mc-wake-, content-review-) with no output = unexpected.
           // Use 'completed_empty' -- NOT 'failed' which triggers poller retry loops.
           updateTaskAfterRun(task.id, nextRun, '[completed with no output]', 'completed_empty');
           logger.warn({ taskId: task.id }, 'Poller-managed task produced no output -- marked completed_empty (no retry)');

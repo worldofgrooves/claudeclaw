@@ -1062,8 +1062,10 @@ export function deleteScheduledTask(id: string): void {
 
 export function pauseScheduledTask(id: string, reason?: string): void {
   if (reason) {
+    // Pausing due to an error -- store reason and mark last_status=failed so
+    // getRecentTaskOutputs() does not serve the error text as successful output.
     db.prepare(
-      `UPDATE scheduled_tasks SET status = 'paused', last_result = ? WHERE id = ?`,
+      `UPDATE scheduled_tasks SET status = 'paused', last_result = ?, last_status = 'failed' WHERE id = ?`,
     ).run(reason, id);
   } else {
     db.prepare(`UPDATE scheduled_tasks SET status = 'paused' WHERE id = ?`).run(id);

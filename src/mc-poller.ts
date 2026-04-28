@@ -115,8 +115,8 @@ async function fetchAgentMap(): Promise<Map<string, string>> {
 
 /**
  * Fetch the latest verification failure comment for a task from mc_task_comments.
- * Used to provide context when re-dispatching a task that was sent back by Jarvis
- * after verification failure, so the agent knows WHY it was returned.
+ * Used to provide context when re-dispatching a task that was sent back after
+ * Codex review failure, so the agent knows WHY it was returned.
  *
  * Returns the comment body if a failure comment exists, null otherwise.
  */
@@ -156,14 +156,14 @@ async function fetchVerificationContext(taskUuid: string): Promise<string | null
 }
 
 /**
- * Poll for build tasks in 'review' status and wake Jarvis to run verification.
+ * Poll for build tasks in 'review' status and route to Janet for Codex verification.
  *
- * Jarvis is the central QA verification agent. When a builder marks a task as
- * 'review', Jarvis picks it up, runs the full verification pipeline (commit on
- * main, Vercel deploy, behavioral checks), and either passes it to Janet for
- * final approval or sends it back to the builder with diagnostics.
+ * When a builder marks a task as 'review', Janet picks it up and runs a Codex
+ * review via the Codex CLI. On clean result, Janet marks done and notifies Denver.
+ * On findings, Janet classifies severity -- P1 goes back to the builder with an
+ * MC comment; P2 gets documented and task moves to done.
  *
- * Flow: Builder -> review -> Jarvis (QA) -> Janet (approval) -> Denver
+ * Flow: Builder -> review -> Janet (Codex review) -> done / back to builder
  *
  * Runs every 30s alongside the assignment poller. ~30s worst-case latency is
  * fine for build verification.
@@ -197,17 +197,16 @@ async function pollReviewTasks(): Promise<void> {
     for (const task of tasks) {
       const taskId = `verify-${task.task_number}-poll`;
 
-      // Dedup: skip if verification wake is currently running or hasn't executed yet.
-      // When a previous verification PASSED, check if this is a genuine re-review
-      // (task re-submitted after fixes) or a stale poll cycle. If Jarvis already
+      // Dedup: skip if Codex review wake is currently running or hasn't executed yet.
+      // When a previous review PASSED, check if this is a genuine re-review
+      // (task re-submitted after fixes) or a stale poll cycle. If Codex already
       // passed this task and the MC status hasn't changed, close the loop -- don't
-      // re-dispatch. This prevents redundant verification cycles that burn tokens
-      // when the MC status update to 'done' failed or when Jarvis passes but
-      // Janet hasn't consumed the approval signal yet.
+      // re-dispatch. This prevents redundant review cycles that burn tokens
+      // when the MC status update to 'done' failed or is still being processed.
       const existing = getScheduledTask(taskId);
       if (existing) {
         if (existing.last_status === 'success') {
-          // Jarvis already passed this. Check if it was re-submitted (updated_at changed)
+          // Codex review already passed this. Check if it was re-submitted (updated_at changed)
           // or if we're just cycling on a stale review status.
           const lastRun = existing.last_run || 0;
           const taskUpdatedAt = task.updated_at
@@ -215,14 +214,14 @@ async function pollReviewTasks(): Promise<void> {
             : 0;
 
           if (taskUpdatedAt <= lastRun) {
-            // Task hasn't been re-submitted since Jarvis last passed it.
+            // Task hasn't been re-submitted since Codex last passed it.
             // Close the loop: try to update MC to 'done' directly and stop cycling.
             logger.info(
               { taskNumber: task.task_number, taskId },
               'MC poller: verification already passed, closing loop (no re-dispatch)',
             );
 
-            // Attempt to move MC task to 'done' since Jarvis already approved
+            // Attempt to move MC task to 'done' since Codex review already passed
             try {
               const patchUrl = `${SUPABASE_URL}/rest/v1/mc_tasks?task_number=eq.${task.task_number}`;
               const patchRes = await fetch(patchUrl, {
@@ -250,7 +249,7 @@ async function pollReviewTasks(): Promise<void> {
                 );
                 // DO NOT delete the scheduled task -- keep it as a dedup guard.
                 // Next poll cycle will retry auto-close. This prevents the
-                // re-verification loop where Jarvis gets woken 12+ times.
+                // re-verification loop where the review gets triggered 12+ times.
               }
             } catch (err) {
               logger.warn({ err, taskNumber: task.task_number }, 'MC poller: error auto-closing verified task -- keeping dedup guard');
@@ -259,7 +258,7 @@ async function pollReviewTasks(): Promise<void> {
             continue;
           }
 
-          // Task was re-submitted after Jarvis passed -- legitimate re-review
+          // Task was re-submitted after Codex passed -- legitimate re-review
           deleteScheduledTask(taskId);
           // Fall through to create new wake
         } else if (existing.last_status === 'timeout' || existing.last_status === 'failed') {
@@ -268,7 +267,7 @@ async function pollReviewTasks(): Promise<void> {
         } else if (existing.last_status === 'completed_empty') {
           // Agent produced no output on verification -- do not retry unless re-submitted.
           // Mirror the success branch's freshness check: if the MC task was updated
-          // after Jarvis last ran, treat as a legitimate re-review and re-dispatch.
+          // after Codex last ran, treat as a legitimate re-review and re-dispatch.
           const lastRun = existing.last_run || 0;
           const taskUpdatedAt = task.updated_at
             ? Math.floor(new Date(task.updated_at).getTime() / 1000)
@@ -301,50 +300,51 @@ async function pollReviewTasks(): Promise<void> {
         ? agentMap.get(task.assignee_agent_id) || 'Unknown builder'
         : 'Unknown builder';
 
-      // Jarvis verification prompt -- Jarvis runs the QA pipeline autonomously
       const verifyPrompt = [
-        `BUILD VERIFICATION REQUIRED -- Task #${task.task_number}: ${task.title || 'Untitled'}.`,
+        `CODEX REVIEW REQUIRED -- Task #${task.task_number}: ${task.title || 'Untitled'}.`,
         `Builder: ${builderName}.`,
         deployUrl ? `Deploy URL: ${deployUrl}.` : '',
         '',
-        'You are the QA verification gate. Run the full Build Verification Pipeline from your CLAUDE.md:',
+        'Run Codex verification per the Codex Integration Protocol (ops/protocols/codex-integration-protocol.md).',
         '',
-        '1. Query MC for this task\'s details and latest comment (contains deploy URL and what to verify)',
-        '2. Verify the commit is on origin/main (if not, REJECT immediately)',
-        '3. Verify Vercel production deployment is READY',
-        `4. Run behavioral verification: bash ~/Documents/Dev/SynologyDrive/Dev/Workspace/janet/scripts/handle-build-review.sh ${task.task_number}${deployUrl ? ' "' + deployUrl + '"' : ''}`,
-        '5. Based on the result:',
-        '   - PASS: Add VERIFICATION PASS comment to MC, then IMMEDIATELY update MC task status:',
+        '1. Query MC for this task\'s latest comment to understand what was changed.',
+        '2. Run the Codex CLI directly via Bash:',
+        '   node "/Users/janetsvoid/.claude/plugins/cache/codex-plugin-cc/codex/1.0.4/scripts/codex-companion.mjs" task --fresh "Review the latest commit(s) for MC task #' + task.task_number + '. Check for correctness issues, error handling gaps, and deviations from the fix brief. Report CLEAN if no discrete correctness issues found, or list each finding with severity (P1=blocking, P2=non-blocking)."',
+        '3. Read the Codex output and evaluate:',
+        '   - CLEAN (no discrete correctness issues):',
+        '     Add a CODEX PASS comment to MC, then IMMEDIATELY update MC task status:',
         '     UPDATE mc_tasks SET status = \'done\', completed_at = now(), updated_at = now() WHERE task_number = ' + task.task_number + ';',
-        '     This status update is MANDATORY -- without it, the poller re-dispatches you in an infinite loop. Do NOT skip this step.',
-        '     Then log to HiveMind as verification_pass.',
-        '   - FAIL: Add VERIFICATION FAIL comment to MC with diagnostics, then IMMEDIATELY update MC task status:',
+        '     This status update is MANDATORY -- without it, the poller re-dispatches in an infinite loop.',
+        '     Log to HiveMind as verification_pass. Notify Denver that the task is verified and done.',
+        '   - P1 FINDING (blocking correctness issue):',
+        '     Add an MC comment with the Codex finding translated into an actionable fix instruction.',
+        '     IMMEDIATELY update MC task status:',
         '     UPDATE mc_tasks SET status = \'assigned\', updated_at = now() WHERE task_number = ' + task.task_number + ';',
-        '     Then log to HiveMind as verification_fail.',
-        '6. If this is the 3rd failure cycle for this task, escalate to Janet instead of sending back to builder.',
-        '7. Do NOT notify Denver directly. Janet handles that after reviewing your report.',
-        '8. Do NOT ask Denver for help. Handle the full verification loop autonomously.',
+        '     Log to HiveMind as verification_fail.',
+        '   - P2 FINDING (non-blocking, cosmetic, or minor):',
+        '     Document the finding in an MC comment. Mark task done. Proceed.',
+        '4. If this is the 2nd consecutive failure on the same finding, escalate to Denver.',
+        '5. Do NOT skip the MC status update. The poller uses it to close the loop.',
       ].filter(Boolean).join('\n');
 
       const now = Math.floor(Date.now() / 1000);
 
       try {
-        // Route to Jarvis (QA agent), not main (Janet)
-        createScheduledTask(taskId, verifyPrompt, '0 0 1 1 *', now, 'jarvis');
+        createScheduledTask(taskId, verifyPrompt, '0 0 1 1 *', now, 'main');
 
         // Send SIGUSR1 for near-instant wake
-        const nudged = nudgeAgent('jarvis');
+        const nudged = nudgeAgent('main');
 
         logger.info(
           { taskNumber: task.task_number, taskId, deployUrl, builderName, nudged },
-          'MC poller: verification wake task created for Jarvis (QA)',
+          'MC poller: Codex review task created for Janet',
         );
 
         // Status channel notification: verification triggered
         const verifyNotify = statusSender || notifySender;
         if (verifyNotify) {
           void verifyNotify(
-            `\u{1F50D} Verification triggered for Task #${task.task_number}: ${task.title || 'Untitled'} (builder: ${builderName}) -- routed to Jarvis`,
+            `\u{1F50D} Codex review triggered for Task #${task.task_number}: ${task.title || 'Untitled'} (builder: ${builderName}) -- routed to Janet`,
           ).catch(() => {});
         }
       } catch (err) {
@@ -361,8 +361,8 @@ async function pollReviewTasks(): Promise<void> {
 
 /**
  * Poll for non-build tasks in 'review' status.
- * Routes to Janet (main process) for quality review instead of Jarvis.
- * Build tasks continue to route through pollReviewTasks() -> Jarvis.
+ * Routes to Janet (main process) for quality review.
+ * Build tasks route through pollReviewTasks() -> Janet (Codex review).
  */
 async function pollContentReviewTasks(): Promise<void> {
   try {
@@ -471,7 +471,7 @@ async function pollContentReviewTasks(): Promise<void> {
           `   - The original builder will be re-woken with the feedback\n\n` +
           `Do NOT auto-approve. Read the actual deliverable content before deciding.`;
 
-        // Route to main (Janet) -- NOT jarvis
+        // Route to main (Janet) for quality review
         createScheduledTask(taskId, reviewPrompt, '0 0 1 1 *', now, 'main');
         logger.info(
           { taskNumber: task.task_number, department: task.department, builder: builderName },
@@ -701,7 +701,7 @@ async function pollMCAssignments(opts: { startup?: boolean } = {}): Promise<void
       }
 
       try {
-        // Check for verification failure context (re-dispatch after Jarvis rejected)
+        // Check for verification failure context (re-dispatch after Codex review failed)
         const verificationContext = await fetchVerificationContext(task.id);
 
         // Write wake task directly to shared SQLite -- the target agent's
@@ -931,7 +931,7 @@ export function initMCPoller(send?: Sender, sendStatus?: Sender): void {
   // Subsequent polls use the 2-min rolling window (avoids full-table scans every 30s).
   setInterval(() => void pollMCAssignments(), POLL_INTERVAL_MS);
 
-  // Poll for build tasks in 'review' status -- routes to Jarvis for QA verification
+  // Poll for build tasks in 'review' status -- routes to Janet for Codex verification
   void pollReviewTasks();
   setInterval(() => void pollReviewTasks(), POLL_INTERVAL_MS);
 

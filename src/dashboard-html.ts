@@ -762,7 +762,8 @@ async function loadTasks() {
         ? '<button data-task="' + t.id + '" data-action="pause" onclick="taskAction(this.dataset.task,this.dataset.action)" title="Pause" style="background:none;border:none;cursor:pointer;color:#fbbf24;font-size:14px;padding:2px 4px">&#9208;</button>'
         : t.status === 'paused' ? '<button data-task="' + t.id + '" data-action="resume" onclick="taskAction(this.dataset.task,this.dataset.action)" title="Resume" style="background:none;border:none;cursor:pointer;color:#6ee7b7;font-size:14px;padding:2px 4px">&#9654;</button>' : '';
       const deleteBtn = '<button data-task="' + t.id + '" data-action="delete" onclick="taskAction(this.dataset.task,this.dataset.action)" title="Delete" style="background:none;border:none;cursor:pointer;color:#f87171;font-size:14px;padding:2px 4px">&times;</button>';
-      const taskBlurState = JSON.parse(localStorage.getItem('privacyBlur_tasks') || '{}');
+      let taskBlurState = {};
+      try { taskBlurState = JSON.parse(localStorage.getItem('privacyBlur_tasks') || '{}'); } catch(e) { console.error('Failed to parse privacyBlur_tasks from localStorage', e); }
       const tasksAllRevealed = localStorage.getItem('privacyBlur_tasks_all') === 'revealed';
       const taskBlurred = tasksAllRevealed ? false : (taskBlurState[t.id] !== false);
       const taskBlurClass = taskBlurred ? 'privacy-blur' : '';
@@ -1480,7 +1481,8 @@ function toggleItemBlur(el) {
   const section = el.dataset.section;
   const idx = el.dataset.idx;
   const key = 'privacyBlur_' + section;
-  const state = JSON.parse(localStorage.getItem(key) || '{}');
+  let state = {};
+  try { state = JSON.parse(localStorage.getItem(key) || '{}'); } catch(e) { console.error('Failed to parse ' + key + ' from localStorage', e); }
   const isCurrentlyBlurred = el.classList.contains('privacy-blur');
   if (isCurrentlyBlurred) {
     el.classList.remove('privacy-blur');
@@ -2032,27 +2034,35 @@ function connectChatSSE() {
   chatSSE = new EventSource(url);
 
   chatSSE.addEventListener('user_message', function(e) {
-    const ev = JSON.parse(e.data);
-    appendChatBubble('user', ev.content, ev.source, true);
-    if (!chatOpen) { unreadCount++; updateFabBadge(); }
+    try {
+      const ev = JSON.parse(e.data);
+      appendChatBubble('user', ev.content, ev.source, true);
+      if (!chatOpen) { unreadCount++; updateFabBadge(); }
+    } catch(err) { console.error('Failed to parse user_message SSE event', err); }
   });
 
   chatSSE.addEventListener('assistant_message', function(e) {
-    const ev = JSON.parse(e.data);
-    appendChatBubble('assistant', ev.content, ev.source, true);
-    hideTyping();
-    if (!chatOpen) { unreadCount++; updateFabBadge(); }
-    if (chatOpen) loadSessionInfo();
+    try {
+      const ev = JSON.parse(e.data);
+      appendChatBubble('assistant', ev.content, ev.source, true);
+      hideTyping();
+      if (!chatOpen) { unreadCount++; updateFabBadge(); }
+      if (chatOpen) loadSessionInfo();
+    } catch(err) { console.error('Failed to parse assistant_message SSE event', err); }
   });
 
   chatSSE.addEventListener('processing', function(e) {
-    const ev = JSON.parse(e.data);
-    if (ev.processing) showTyping(); else hideTyping();
+    try {
+      const ev = JSON.parse(e.data);
+      if (ev.processing) showTyping(); else hideTyping();
+    } catch(err) { console.error('Failed to parse processing SSE event', err); }
   });
 
   chatSSE.addEventListener('progress', function(e) {
-    const ev = JSON.parse(e.data);
-    showProgress(ev.description);
+    try {
+      const ev = JSON.parse(e.data);
+      showProgress(ev.description);
+    } catch(err) { console.error('Failed to parse progress SSE event', err); }
   });
 
   chatSSE.addEventListener('error', function(e) {

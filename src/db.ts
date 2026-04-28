@@ -749,12 +749,21 @@ export function getMemoriesWithEmbeddings(chatId: string): Array<{ id: number; e
   const rows = db
     .prepare('SELECT id, embedding, summary, importance FROM memories WHERE chat_id = ? AND embedding IS NOT NULL AND superseded_by IS NULL')
     .all(chatId) as Array<{ id: number; embedding: string; summary: string; importance: number }>;
-  return rows.map((r) => ({
-    id: r.id,
-    embedding: JSON.parse(r.embedding) as number[],
-    summary: r.summary,
-    importance: r.importance,
-  }));
+  return rows
+    .map((r) => {
+      try {
+        return {
+          id: r.id,
+          embedding: JSON.parse(r.embedding) as number[],
+          summary: r.summary,
+          importance: r.importance,
+        };
+      } catch (err) {
+        logger.warn({ err, memoryId: r.id }, 'Corrupted embedding row in getMemoriesWithEmbeddings, skipping');
+        return null;
+      }
+    })
+    .filter((r): r is NonNullable<typeof r> => r !== null);
 }
 
 export function getRecentHighImportanceMemories(chatId: string, limit = 5): Memory[] {
@@ -870,7 +879,16 @@ export function getConsolidationsWithEmbeddings(chatId: string): Array<{ id: num
   const rows = db
     .prepare('SELECT id, embedding, summary, insight FROM consolidations WHERE chat_id = ? AND embedding IS NOT NULL AND embedding_model = ?')
     .all(chatId, 'embedding-001') as Array<{ id: number; embedding: string; summary: string; insight: string }>;
-  return rows.map((r) => ({ ...r, embedding: JSON.parse(r.embedding) as number[] }));
+  return rows
+    .map((r) => {
+      try {
+        return { ...r, embedding: JSON.parse(r.embedding) as number[] };
+      } catch (err) {
+        logger.warn({ err, consolidationId: r.id }, 'Corrupted embedding row in getConsolidationsWithEmbeddings, skipping');
+        return null;
+      }
+    })
+    .filter((r): r is NonNullable<typeof r> => r !== null);
 }
 
 export function supersedeMemory(oldId: number, newId: number): void {
@@ -882,7 +900,13 @@ export function supersedeMemory(oldId: number, newId: number): void {
 export function updateMemoryConnections(memoryId: number, connections: Array<{ linked_to: number; relationship: string }>): void {
   const row = db.prepare('SELECT connections FROM memories WHERE id = ?').get(memoryId) as { connections: string } | undefined;
   if (!row) return;
-  const existing: Array<{ linked_to: number; relationship: string }> = JSON.parse(row.connections);
+  let existing: Array<{ linked_to: number; relationship: string }>;
+  try {
+    existing = JSON.parse(row.connections);
+  } catch (err) {
+    logger.warn({ err, memoryId }, 'Corrupted connections field in updateMemoryConnections, defaulting to empty');
+    existing = [];
+  }
   const merged = [...existing, ...connections];
   // Deduplicate by linked_to to prevent unbounded growth on re-consolidation
   const seen = new Set<number>();

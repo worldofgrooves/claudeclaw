@@ -126,10 +126,16 @@ export async function downloadTelegramFile(
   // Step 1: Get the file path from Telegram
   const infoUrl = `https://api.telegram.org/bot${botToken}/getFile?file_id=${encodeURIComponent(fileId)}`;
   const infoBuffer = await httpsGet(infoUrl);
-  const info = JSON.parse(infoBuffer.toString('utf-8')) as {
-    ok: boolean;
-    result?: { file_path?: string };
-  };
+  let info: { ok: boolean; result?: { file_path?: string } };
+  try {
+    info = JSON.parse(infoBuffer.toString('utf-8')) as {
+      ok: boolean;
+      result?: { file_path?: string };
+    };
+  } catch (err) {
+    logger.warn({ err, fileId }, 'Failed to parse Telegram getFile response in downloadFileFromTelegram');
+    throw new Error(`Failed to parse Telegram getFile response for file_id=${fileId}: ${infoBuffer.toString('utf-8').slice(0, 300)}`);
+  }
 
   if (!info.ok || !info.result?.file_path) {
     throw new Error(`Telegram getFile failed: ${infoBuffer.toString('utf-8').slice(0, 300)}`);

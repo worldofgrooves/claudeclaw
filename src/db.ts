@@ -1048,10 +1048,17 @@ export function getRecentTaskOutputs(
   withinMinutes = 30,
 ): Array<{ prompt: string; last_result: string; last_run: number }> {
   const cutoff = Math.floor(Date.now() / 1000) - withinMinutes * 60;
+  // Filter mc-wake-* no-ops from context. These fire frequently and produce
+  // '[no-op: agent had no assigned tasks]' when there's nothing to do.
+  // mc-wake-* tasks WITH real output are kept (agent processed an MC task).
+  // verify-* and content-review-* are NOT filtered -- they contain real work.
+  // NOTE: The no-op string is set in scheduler.ts (~line 271). If it changes there,
+  // update the match here too.
   return db
     .prepare(
       `SELECT prompt, last_result, last_run FROM scheduled_tasks
        WHERE agent_id = ? AND last_status = 'success' AND last_run > ?
+         AND NOT (id LIKE 'mc-wake-%' AND last_result = '[no-op: agent had no assigned tasks]')
        ORDER BY last_run DESC LIMIT 3`,
     )
     .all(agentId, cutoff) as Array<{ prompt: string; last_result: string; last_run: number }>;

@@ -92,6 +92,55 @@ Reply with JSON: {"agent": "agent_id"}`;
   }
 }
 
+// ── Session management ───────────────────────────────────────────────────
+// One-time codes: exchanged for a session cookie, expire after 60s or first use
+const pendingSessions = new Map<string, { chatId: string; expiresAt: number }>();
+// Active sessions: validated on every request via cookie
+const activeSessions = new Set<string>();
+
+// Prune expired pending sessions every 5 minutes
+const _pruneInterval = setInterval(() => {
+  const now = Date.now();
+  for (const [code, session] of pendingSessions) {
+    if (session.expiresAt < now) pendingSessions.delete(code);
+  }
+}, 300_000);
+_pruneInterval.unref(); // Don't keep the process alive for cleanup
+
+// Prune active sessions after 24h (max 1000 entries, FIFO eviction)
+const SESSION_MAX_AGE_MS = 86_400_000;
+const sessionTimestamps = new Map<string, number>();
+
+function addActiveSession(sessionId: string): void {
+  // FIFO eviction if at capacity
+  if (activeSessions.size >= 1000) {
+    const oldest = sessionTimestamps.entries().next().value;
+    if (oldest) {
+      activeSessions.delete(oldest[0]);
+      sessionTimestamps.delete(oldest[0]);
+    }
+  }
+  activeSessions.add(sessionId);
+  sessionTimestamps.set(sessionId, Date.now());
+}
+
+function isSessionValid(sessionId: string): boolean {
+  const created = sessionTimestamps.get(sessionId);
+  if (!created) return false;
+  if (Date.now() - created > SESSION_MAX_AGE_MS) {
+    activeSessions.delete(sessionId);
+    sessionTimestamps.delete(sessionId);
+    return false;
+  }
+  return activeSessions.has(sessionId);
+}
+
+export function createDashboardSession(chatId: string): string {
+  const code = crypto.randomBytes(32).toString('hex');
+  pendingSessions.set(code, { chatId, expiresAt: Date.now() + 60_000 });
+  return code;
+}
+
 export function startDashboard(botApi?: Api<RawApi>): void {
   if (!DASHBOARD_TOKEN) {
     logger.info('DASHBOARD_TOKEN not set, dashboard disabled');
@@ -100,11 +149,18 @@ export function startDashboard(botApi?: Api<RawApi>): void {
 
   const app = new Hono();
 
-  // CORS headers for cross-origin access (Cloudflare tunnel, mobile browsers)
+  // CORS headers -- echo origin for credentialed requests
   app.use('*', async (c, next) => {
-    c.header('Access-Control-Allow-Origin', '*');
+    const origin = c.req.header('origin');
+    if (origin) {
+      c.header('Access-Control-Allow-Origin', origin);
+      c.header('Access-Control-Allow-Credentials', 'true');
+    } else {
+      c.header('Access-Control-Allow-Origin', '*');
+    }
     c.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, PATCH, OPTIONS');
     c.header('Access-Control-Allow-Headers', 'Content-Type');
+    c.header('Vary', 'Origin');
     if (c.req.method === 'OPTIONS') return c.body(null, 204);
     await next();
   });
@@ -115,19 +171,45 @@ export function startDashboard(botApi?: Api<RawApi>): void {
     return c.json({ error: 'Internal server error' }, 500);
   });
 
-  // Token auth middleware
-  app.use('*', async (c, next) => {
-    const token = c.req.query('token');
-    if (!DASHBOARD_TOKEN || !token || token !== DASHBOARD_TOKEN) {
-      return c.json({ error: 'Unauthorized' }, 401);
-    }
-    await next();
-  });
-
-  // Serve dashboard HTML
+  // Serve dashboard HTML -- before auth middleware so the page can load with ?code=
   app.get('/', (c) => {
     const chatId = c.req.query('chatId') || '';
-    return c.html(getDashboardHtml(DASHBOARD_TOKEN, chatId));
+    const code = c.req.query('code') || '';
+    return c.html(getDashboardHtml(chatId, code));
+  });
+
+  // ── Auth endpoints (before auth middleware) ──────────────────────────────
+
+  // Exchange a one-time code for a session cookie
+  app.get('/auth/exchange', (c) => {
+    const code = c.req.query('code');
+    if (!code) return c.json({ error: 'Missing code' }, 400);
+
+    const session = pendingSessions.get(code);
+    if (!session || session.expiresAt < Date.now()) {
+      if (code) pendingSessions.delete(code);
+      return c.json({ error: 'Invalid or expired code' }, 401);
+    }
+
+    pendingSessions.delete(code);
+
+    // Create session and set cookie directly -- token never enters JS
+    const sessionId = crypto.randomBytes(32).toString('hex');
+    addActiveSession(sessionId);
+
+    c.header('Set-Cookie', `claw_session=${sessionId}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400`);
+    return c.json({ ok: true, chatId: session.chatId });
+  });
+
+  // Auth middleware -- cookie sessions only
+  app.use('*', async (c, next) => {
+    const cookieHeader = c.req.header('cookie') || '';
+    const sessionMatch = cookieHeader.match(/claw_session=([a-f0-9]+)/);
+    if (sessionMatch && isSessionValid(sessionMatch[1])) {
+      await next();
+      return;
+    }
+    return c.json({ error: 'Unauthorized' }, 401);
   });
 
   // Scheduled tasks

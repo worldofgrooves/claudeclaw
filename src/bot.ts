@@ -31,6 +31,7 @@ import { messageQueue } from './message-queue.js';
 import { parseDelegation, delegateToAgent, getAvailableAgents } from './orchestrator.js';
 import { listAgentIds } from './agent-config.js';
 import { emitChatEvent, setProcessing, setActiveAbort, abortActiveQuery } from './state.js';
+import { createDashboardSession } from './dashboard.js';
 import {
   isLocked,
   lock,
@@ -1091,7 +1092,8 @@ export function createBot(): Bot {
     }
     const chatIdStr = ctx.chat!.id.toString();
     const base = DASHBOARD_URL || `http://localhost:${DASHBOARD_PORT}`;
-    const url = `${base}/?token=${DASHBOARD_TOKEN}&chatId=${chatIdStr}`;
+    const sessionCode = createDashboardSession(chatIdStr);
+    const url = `${base}/?code=${sessionCode}`;
     await ctx.reply(`<a href="${url}">Open Dashboard</a>`, { parse_mode: 'HTML' });
   });
 

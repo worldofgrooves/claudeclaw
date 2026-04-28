@@ -1,4 +1,5 @@
-export function getDashboardHtml(token: string, chatId: string): string {
+export function getDashboardHtml(chatId: string, code?: string): string {
+  const token = ''; // S1: token no longer passed to browser; S2 will remove this global entirely
   return `<!DOCTYPE html>
 <html lang="en">
 <head>

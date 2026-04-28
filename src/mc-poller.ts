@@ -340,6 +340,7 @@ export async function handleBuildReviewTasks(tasks: MCTask[], agentMap: Map<stri
       '',
       '1. Query MC for this task\'s latest comment to understand what was changed.',
       '2. Run the Codex CLI directly via Bash:',
+      // `task --fresh` runs foreground (blocking) by default -- equivalent to --wait. No flag change needed.
       '   node "' + codexCliPath + '" task --fresh "Review the latest commit(s) for MC task #' + task.task_number + '. Check for correctness issues, error handling gaps, and deviations from the fix brief. Report CLEAN if no discrete correctness issues found, or list each finding with severity (P1=blocking, P2=non-blocking)."',
       '3. Read the Codex output and evaluate:',
       '   - CLEAN (no discrete correctness issues):',

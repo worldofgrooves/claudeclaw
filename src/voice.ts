@@ -9,6 +9,7 @@ import { promisify } from 'util';
 
 import { logger } from './logger.js';
 import { readEnvFile } from './env.js';
+import { redactBotToken } from './media.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -55,7 +56,7 @@ function httpsRequest(
         if (res.statusCode && res.statusCode >= 400) {
           reject(
             new Error(
-              `HTTP ${res.statusCode}: ${buf.toString('utf-8').slice(0, 500)}`,
+              `HTTP ${res.statusCode}: ${redactBotToken(buf.toString('utf-8').slice(0, 500))}`,
             ),
           );
           return;
@@ -98,7 +99,7 @@ function httpsGet(url: string): Promise<Buffer> {
         if (res.statusCode && res.statusCode >= 400) {
           reject(
             new Error(
-              `HTTP ${res.statusCode}: ${buf.toString('utf-8').slice(0, 500)}`,
+              `HTTP ${res.statusCode}: ${redactBotToken(buf.toString('utf-8').slice(0, 500))}`,
             ),
           );
           return;
@@ -134,11 +135,11 @@ export async function downloadTelegramFile(
     };
   } catch (err) {
     logger.warn({ err, fileId }, 'Failed to parse Telegram getFile response in downloadFileFromTelegram');
-    throw new Error(`Failed to parse Telegram getFile response for file_id=${fileId}: ${infoBuffer.toString('utf-8').slice(0, 300)}`);
+    throw new Error(`Failed to parse Telegram getFile response for file_id=${fileId}: ${redactBotToken(infoBuffer.toString('utf-8').slice(0, 300))}`);
   }
 
   if (!info.ok || !info.result?.file_path) {
-    throw new Error(`Telegram getFile failed: ${infoBuffer.toString('utf-8').slice(0, 300)}`);
+    throw new Error(`Telegram getFile failed: ${redactBotToken(infoBuffer.toString('utf-8').slice(0, 300))}`);
   }
 
   // Step 2: Download the actual file

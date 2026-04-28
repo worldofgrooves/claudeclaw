@@ -8,6 +8,15 @@ import { logger } from './logger.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+/**
+ * Redact bot tokens from Telegram API URLs before including in error messages.
+ * Telegram URLs contain `/bot{TOKEN}/` or `/file/bot{TOKEN}/` -- replace the
+ * token portion with `[REDACTED]`.
+ */
+export function redactBotToken(url: string): string {
+  return url.replace(/\/bot[A-Za-z0-9:_-]+\//g, '/bot[REDACTED]/');
+}
+
 // Directory where all Telegram media is saved
 export const UPLOADS_DIR = path.resolve(__dirname, '..', 'workspace', 'uploads');
 
@@ -27,7 +36,7 @@ function httpsGet(url: string): Promise<string> {
       }
 
       if (res.statusCode && res.statusCode >= 400) {
-        reject(new Error(`HTTP ${res.statusCode} from ${url}`));
+        reject(new Error(`HTTP ${res.statusCode} from ${redactBotToken(url)}`));
         return;
       }
 
@@ -52,7 +61,7 @@ function httpsDownload(url: string, dest: string): Promise<void> {
       }
 
       if (res.statusCode && res.statusCode >= 400) {
-        reject(new Error(`HTTP ${res.statusCode} downloading ${url}`));
+        reject(new Error(`HTTP ${res.statusCode} downloading ${redactBotToken(url)}`));
         return;
       }
 
@@ -103,11 +112,11 @@ export async function downloadMedia(
     parsed = JSON.parse(responseBody) as { ok: boolean; result?: { file_path?: string } };
   } catch (err) {
     logger.warn({ err, fileId }, 'Failed to parse Telegram getFile response in downloadMedia');
-    throw new Error(`Failed to parse Telegram getFile response for file_id=${fileId}: ${String(responseBody).slice(0, 300)}`);
+    throw new Error(`Failed to parse Telegram getFile response for file_id=${fileId}: ${redactBotToken(String(responseBody).slice(0, 300))}`);
   }
 
   if (!parsed.ok || !parsed.result?.file_path) {
-    throw new Error(`Telegram getFile failed for file_id=${fileId}: ${responseBody}`);
+    throw new Error(`Telegram getFile failed for file_id=${fileId}: ${redactBotToken(String(responseBody))}`);
   }
 
   const telegramFilePath = parsed.result.file_path;

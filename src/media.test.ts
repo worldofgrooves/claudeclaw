@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import path from 'path';
 import fs from 'fs';
-import { buildPhotoMessage, buildDocumentMessage, cleanupOldUploads, UPLOADS_DIR } from './media.js';
+import { buildPhotoMessage, buildDocumentMessage, cleanupOldUploads, UPLOADS_DIR, redactBotToken } from './media.js';
 
 describe('buildPhotoMessage', () => {
   it('returns string containing the file path', () => {
@@ -87,6 +87,35 @@ describe('cleanupOldUploads', () => {
       try { fs.unlinkSync(oldFile); } catch { /* ignore */ }
       try { fs.rmdirSync(testDir); } catch { /* ignore */ }
     }
+  });
+});
+
+describe('redactBotToken', () => {
+  it('redacts bot token from Telegram API URL', () => {
+    const url = 'https://api.telegram.org/bot123456:ABC-DEF/getFile?file_id=abc';
+    expect(redactBotToken(url)).toBe('https://api.telegram.org/bot[REDACTED]/getFile?file_id=abc');
+  });
+
+  it('redacts bot token from Telegram file download URL', () => {
+    const url = 'https://api.telegram.org/file/bot123456:ABC-DEF/photos/file_1.jpg';
+    expect(redactBotToken(url)).toBe('https://api.telegram.org/file/bot[REDACTED]/photos/file_1.jpg');
+  });
+
+  it('does not modify URLs without bot tokens', () => {
+    const url = 'https://example.com/api/resource';
+    expect(redactBotToken(url)).toBe('https://example.com/api/resource');
+  });
+
+  it('handles empty string', () => {
+    expect(redactBotToken('')).toBe('');
+  });
+
+  it('redacts multiple tokens in a single string', () => {
+    const msg = 'Failed: https://api.telegram.org/bot123:ABC/getFile then https://api.telegram.org/file/bot456:DEF/file.jpg';
+    const result = redactBotToken(msg);
+    expect(result).not.toContain('123:ABC');
+    expect(result).not.toContain('456:DEF');
+    expect(result).toContain('bot[REDACTED]/');
   });
 });
 
